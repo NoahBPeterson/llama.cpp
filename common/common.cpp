@@ -911,7 +911,9 @@ struct common_init_result common_init_from_params(common_params & params) {
     } else if (!params.model_url.empty()) {
         model = common_load_model_from_url(params.model_url, params.model, params.hf_token, mparams);
     } else {
+        fprintf(stderr, "xyzxyz\n");
         model = llama_model_load_from_file(params.model.c_str(), mparams);
+        fprintf(stderr, "xyzxyz 2\n");
     }
 
     if (model == NULL) {
@@ -947,8 +949,10 @@ struct common_init_result common_init_from_params(common_params & params) {
     }
 
     auto cparams = common_context_params_to_llama(params);
+    fprintf(stderr, "xyzxyz 3\n");
 
     llama_context * lctx = llama_init_from_model(model, cparams);
+    fprintf(stderr, "xyzxyz 4\n");
     if (lctx == NULL) {
         LOG_ERR("%s: failed to create context with model '%s'\n", __func__, params.model.c_str());
         llama_model_free(model);

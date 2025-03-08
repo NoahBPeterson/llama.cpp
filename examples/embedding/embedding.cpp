@@ -86,6 +86,8 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
+    fprintf(stderr, "embedding 0xdeadbeef\n -4");
+
     common_init();
 
     params.embedding = true;
@@ -94,12 +96,16 @@ int main(int argc, char ** argv) {
 
     llama_backend_init();
     llama_numa_init(params.numa);
+    fprintf(stderr, "embedding 0xdeadbeef\n -3");
 
     // load the model
     common_init_result llama_init = common_init_from_params(params);
+    fprintf(stderr, "embedding 0xdeadbeef\n -1");
 
     llama_model * model = llama_init.model.get();
+    fprintf(stderr, "embedding 0xdeadbeef\n -2");
     llama_context * ctx = llama_init.context.get();
+    fprintf(stderr, "embedding 0xdeadbeef\n -3");
 
     if (model == NULL) {
         LOG_ERR("%s: unable to load model\n", __func__);
@@ -107,11 +113,15 @@ int main(int argc, char ** argv) {
     }
 
     const llama_vocab * vocab = llama_model_get_vocab(model);
+    fprintf(stderr, "embedding 0xdeadbeef\n 1");
 
     const int n_ctx_train = llama_model_n_ctx_train(model);
+    fprintf(stderr, "embedding 0xdeadbeef\n 2");
     const int n_ctx = llama_n_ctx(ctx);
+    fprintf(stderr, "embedding 0xdeadbeef\n 3");
 
     const enum llama_pooling_type pooling_type = llama_pooling_type(ctx);
+    fprintf(stderr, "embedding 0xdeadbeef\n 4");
 
     if (llama_model_has_encoder(model) && llama_model_has_decoder(model)) {
         LOG_ERR("%s: computing embeddings in encoder-decoder models is not supported\n", __func__);
@@ -187,6 +197,8 @@ int main(int argc, char ** argv) {
     const int n_embd = llama_model_n_embd(model);
     std::vector<float> embeddings(n_embd_count * n_embd, 0);
     float * emb = embeddings.data();
+
+    fprintf(stderr, "embedding 0xdeadbeef\n");
 
     // break into batches
     int e = 0; // number of embeddings already stored
