@@ -81,6 +81,8 @@ struct llama_hparams {
     float    rope_freq_scale_train;
     uint32_t n_ctx_orig_yarn;
     float    rope_yarn_log_mul;
+    float    rope_local_theta;
+    float    rope_global_theta;
 
     std::array<int, 4> rope_sections;
 
@@ -100,6 +102,10 @@ struct llama_hparams {
     float f_residual_scale  = 0.0f;
     float f_embedding_scale = 0.0f;
     float f_attention_scale = 0.0f;
+
+    // For ModernBert
+    uint32_t global_attn_every_n_layers = 0;
+    uint32_t local_attention = 0;
 
     bool causal_attn   = true;
     bool use_alibi     = false;

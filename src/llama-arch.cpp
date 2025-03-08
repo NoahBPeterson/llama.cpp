@@ -62,6 +62,7 @@ static const std::map<llm_arch, const char *> LLM_ARCH_NAMES = {
     { LLM_ARCH_GRANITE_MOE,      "granitemoe"       },
     { LLM_ARCH_CHAMELEON,        "chameleon"        },
     { LLM_ARCH_WAVTOKENIZER_DEC, "wavtokenizer-dec" },
+    { LLM_ARCH_MODERNBERT,       "modernbert"       },
     { LLM_ARCH_UNKNOWN,          "(unknown)"        },
 };
 
@@ -125,6 +126,8 @@ static const std::map<llm_kv, const char *> LLM_KV_NAMES = {
     { LLM_KV_ATTENTION_RELATIVE_BUCKETS_COUNT, "%s.attention.relative_buckets_count" },
     { LLM_KV_ATTENTION_SLIDING_WINDOW,         "%s.attention.sliding_window"         },
     { LLM_KV_ATTENTION_SCALE,                  "%s.attention.scale"                  },
+    { LLM_KV_LOCAL_ATTENTION,                  "%s.attention.local_attention"        },
+    { LLM_KV_ATTN_EVERY_N_LAYERS,              "%s.attention.global_attn_every_n_layers"},
 
     { LLM_KV_ROPE_DIMENSION_COUNT,      "%s.rope.dimension_count"                 },
     { LLM_KV_ROPE_DIMENSION_SECTIONS,   "%s.rope.dimension_sections"              },
@@ -136,6 +139,9 @@ static const std::map<llm_kv, const char *> LLM_KV_NAMES = {
     { LLM_KV_ROPE_SCALING_ORIG_CTX_LEN, "%s.rope.scaling.original_context_length" },
     { LLM_KV_ROPE_SCALING_FINETUNED,    "%s.rope.scaling.finetuned"               },
     { LLM_KV_ROPE_SCALING_YARN_LOG_MUL, "%s.rope.scaling.yarn_log_multiplier"     },
+    { LLM_KV_LOCAL_ROPE_THETA,          "%s.rope.scaling.global_theta"            },
+    { LLM_KV_GLOBAL_ROPE_THETA,         "%s.rope.scaling.local_theta"             },
+
 
     { LLM_KV_SPLIT_NO,            "split.no"            },
     { LLM_KV_SPLIT_COUNT,         "split.count"         },
@@ -1297,6 +1303,31 @@ static const std::map<llm_arch, std::map<llm_tensor, const char *>> LLM_TENSOR_N
         },
     },
     {
+        LLM_ARCH_MODERNBERT,
+        {
+            { LLM_TENSOR_TOKEN_EMBD,      "token_embd" },
+            { LLM_TENSOR_TOKEN_EMBD_NORM, "token_embd_norm" },
+
+            // Encoder layers:
+            // The attention module stores its combined QKV weight as "Wqkv" – we map that
+            { LLM_TENSOR_ATTN_QKV,        "blk.%d.attn_qkv" },
+            { LLM_TENSOR_ATTN_NORM,       "blk.%d.attn_norm" },
+            // The output projection of attention is stored as "Wo"
+            // Rotary (positional) embedding parameters – adjust if needed
+            { LLM_TENSOR_ATTN_OUT,        "blk.%d.attn_output" },
+            { LLM_TENSOR_ROPE_FREQS,      "blk.%d.attn.rotary_emb" },
+
+            // The MLP (feed-forward) module in ModernBERT has a simple two-layer structure:
+            // a normalization layer and then two linear projections ("Wi" then "Wo").
+            { LLM_TENSOR_FFN_NORM,        "blk.%d.ffn_norm" },
+            { LLM_TENSOR_FFN_DOWN,        "blk.%d.ffn_down" },
+            { LLM_TENSOR_FFN_UP,          "blk.%d.ffn_up" },
+
+            { LLM_TENSOR_ROPE_INV_FREQ,   "blk.%d.rope_inv_freq"},
+            { LLM_TENSOR_OUTPUT_NORM,     "output_norm"},
+        },
+    },
+    {
         LLM_ARCH_UNKNOWN,
         {
             { LLM_TENSOR_TOKEN_EMBD,      "token_embd" },
@@ -1318,6 +1349,7 @@ static const std::map<llm_tensor, llm_tensor_info> LLM_TENSOR_INFOS = {
     {LLM_TENSOR_ROPE_FREQS,                 {LLM_TENSOR_LAYER_REPEATING, GGML_OP_ROPE}},
     {LLM_TENSOR_ROPE_FACTORS_LONG,          {LLM_TENSOR_LAYER_REPEATING, GGML_OP_ROPE}},
     {LLM_TENSOR_ROPE_FACTORS_SHORT,         {LLM_TENSOR_LAYER_REPEATING, GGML_OP_ROPE}},
+    {LLM_TENSOR_ROPE_INV_FREQ,              {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
     {LLM_TENSOR_ATTN_Q,                     {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
     {LLM_TENSOR_ATTN_K,                     {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
     {LLM_TENSOR_ATTN_V,                     {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
@@ -1470,19 +1502,24 @@ std::string LLM_TN_IMPL::str() const {
 }
 
 const char * llm_arch_name(llm_arch arch) {
+    fprintf(stderr, "LLM_ARCH: %d\n", arch);
     auto it = LLM_ARCH_NAMES.find(arch);
     if (it == LLM_ARCH_NAMES.end()) {
+        fprintf(stderr, "LLM_ARCH, unknown?\n");
         return "unknown";
     }
+    fprintf(stderr, "LLM_ARCH, known?: %s\n", it->second);
     return it->second;
 }
 
 llm_arch llm_arch_from_string(const std::string & name) {
     for (const auto & kv : LLM_ARCH_NAMES) { // NOLINT
         if (kv.second == name) {
+            fprintf(stderr, "arch from string: %s\n\n\n\n", name.c_str());
             return kv.first;
         }
     }
+    fprintf(stderr, "arch from string: %s, but UNKNOWN\n\n\n\n", name.c_str());
 
     return LLM_ARCH_UNKNOWN;
 }

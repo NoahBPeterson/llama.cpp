@@ -805,6 +805,21 @@ class GGUFWriter:
 
     def add_rope_scaling_yarn_log_mul(self, value: float) -> None:
         self.add_float32(Keys.Rope.SCALING_YARN_LOG_MUL.format(arch=self.arch), value)
+    
+    ######## MODERNBERT
+
+    def add_rope_global_theta(self, value: float) -> None:
+        self.add_float32(Keys.Rope.ROPE_GLOBAL_THETA.format(arch=self.arch), value)
+
+    def add_rope_local_theta(self, value: float) -> None:
+        self.add_float32(Keys.Rope.ROPE_LOCAL_THETA.format(arch=self.arch), value)
+
+    def add_local_attention(self, value: int) -> None:
+        self.add_uint32(Keys.Attention.LOCAL_ATTENTION.format(arch=self.arch), value)
+
+    def add_global_attn_every_n_layers(self, value: int) -> None:
+        self.add_uint32(Keys.Attention.GLOBAL_ATTN_EVERY_N_LAYERS.format(arch=self.arch), value)
+    ##########
 
     def add_ssm_conv_kernel(self, value: int) -> None:
         self.add_uint32(Keys.SSM.CONV_KERNEL.format(arch=self.arch), value)

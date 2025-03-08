@@ -28,6 +28,7 @@ class TensorNameMap:
             "transformer.token_embeddings",              # openelm
             "shared",                                    # t5
             "rwkv.embeddings",                           # rwkv
+            "embeddings.tok_embeddings",            # modernbert
         ),
 
         # Token type embeddings
@@ -43,6 +44,7 @@ class TensorNameMap:
             "transformer.norm",           # openelm
             "rwkv.blocks.0.pre_ln",       # rwkv
             "backbone.norm",              # wavtokenizer
+            "embeddings.norm",                      # modernbert
         ),
 
         # Position embeddings
@@ -83,6 +85,7 @@ class TensorNameMap:
             "model.norm",                              # nemotron
             "rwkv.ln_out",                             # rwkv
             "backbone.final_layer_norm",               # wavtokenizer
+            "final_norm.weight",                       # modernbert
         ),
 
         # Rope frequencies
@@ -97,6 +100,7 @@ class TensorNameMap:
         MODEL_TENSOR.CONV1D: (
             "backbone.embed", # roberta
         ),
+
     }
 
     block_mappings_cfg: dict[MODEL_TENSOR, tuple[str, ...]] = {
@@ -123,6 +127,7 @@ class TensorNameMap:
             "encoder.layers.{bid}.input_layernorm",                 # chatglm
             "transformer.layers.{bid}.attn_norm",                   # openelm
             "rwkv.blocks.{bid}.ln1",                                # rwkv
+            "layers.{bid}.attn_norm",                               # modernbert
         ),
 
         # Attention norm 2
@@ -148,6 +153,7 @@ class TensorNameMap:
             "model.layers.{bid}.self_attn.qkv_proj",                               # phi3
             "encoder.layers.{bid}.self_attention.query_key_value",                 # chatglm
             "transformer.layers.{bid}.attn.qkv_proj",                              # openelm
+            "layers.{bid}.attn.Wqkv",                                              # modernbert
         ),
 
         # Attention query
@@ -214,6 +220,7 @@ class TensorNameMap:
             "encoder.layers.{bid}.self_attention.dense",                    # chatglm
             "transformer.layers.{bid}.attn.out_proj",                       # openelm
             "transformer.h.{bid}.attn.attention.out_proj",                  # exaone
+            "layers.{bid}.attn.Wo",                                         # modernbert
         ),
 
         # Attention output norm
@@ -251,6 +258,7 @@ class TensorNameMap:
             "transformer.decoder_layer.{bid}.rms_norm_2",                    # Grok
             "encoder.layers.{bid}.post_attention_layernorm",                 # chatglm
             "transformer.layers.{bid}.ffn_norm",                             # openelm
+            "layers.{bid}.mlp_norm",                                         # modernbert
         ),
 
         # Post feed-forward norm
@@ -307,6 +315,7 @@ class TensorNameMap:
             "model.layers.{bid}.residual_mlp.w3",                     # arctic
             "encoder.layers.{bid}.mlp.dense_h_to_4h",                 # chatglm
             "transformer.h.{bid}.mlp.c_fc_1",                         # exaone
+            "layers.{bid}.mlp.Wi",                                    # modernbert
         ),
 
         MODEL_TENSOR.FFN_UP_EXP: (
@@ -381,6 +390,7 @@ class TensorNameMap:
             "encoder.layer.{bid}.mlp.down_layer",                     # jina-bert-v2
             "encoder.layers.{bid}.mlp.dense_4h_to_h",                 # chatglm
             "model.layers.h.{bid}.mlp.c_proj",                        # exaone
+            "layers.{bid}.mlp.Wo",                                    # modernbert
         ),
 
         MODEL_TENSOR.FFN_DOWN_EXP: (

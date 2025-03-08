@@ -25,11 +25,13 @@ const char * llm_type_name(llm_type type) {
         case LLM_TYPE_80M:           return "80M";
         case LLM_TYPE_109M:          return "109M";
         case LLM_TYPE_137M:          return "137M";
+        case LLM_TYPE_150M:          return "150M";
         case LLM_TYPE_160M:          return "160M";
         case LLM_TYPE_220M:          return "220M";
         case LLM_TYPE_250M:          return "250M";
         case LLM_TYPE_270M:          return "270M";
         case LLM_TYPE_335M:          return "335M";
+        case LLM_TYPE_396M:          return "396M";
         case LLM_TYPE_410M:          return "410M";
         case LLM_TYPE_450M:          return "450M";
         case LLM_TYPE_770M:          return "770M";
@@ -1245,6 +1247,39 @@ void llama_model::load_hparams(llama_model_loader & ml) {
                 ml.get_key(LLM_KV_ATTENTION_GROUPNORM_GROUPS, hparams.n_norm_groups);
                 ml.get_key(LLM_KV_ATTENTION_CAUSAL,           hparams.causal_attn);
             } break;
+        case LLM_ARCH_MODERNBERT:
+            {
+                hparams.causal_attn = false;
+
+                ml.get_key(LLM_KV_ROPE_SCALING_ATTN_FACTOR, hparams.rope_attn_factor, false);
+                ml.get_key(LLM_KV_ROPE_FREQ_BASE,           hparams.rope_freq_base_train, false);
+                ml.get_key(LLM_KV_ATTENTION_LAYERNORM_EPS,  hparams.f_norm_eps);
+                ml.get_key(LLM_KV_POOLING_TYPE,             hparams.pooling_type, false);
+                ml.get_key(LLM_KV_GLOBAL_ROPE_THETA,        hparams.rope_global_theta, false);
+                ml.get_key(LLM_KV_ATTN_EVERY_N_LAYERS,      hparams.global_attn_every_n_layers, false);
+                ml.get_key(LLM_KV_LOCAL_ROPE_THETA,         hparams.rope_local_theta, false);
+                ml.get_key(LLM_KV_EMBEDDING_LENGTH,         hparams.n_embd, false);              // hidden_size
+                ml.get_key(LLM_KV_ATTENTION_HEAD_COUNT_KV,  hparams.n_head_arr[0], false);       
+                ml.get_key(LLM_KV_CONTEXT_LENGTH,           hparams.n_ctx_train, false);         // max_position_embeddings
+                ml.get_key(LLM_KV_LOCAL_ATTENTION,          hparams.local_attention, false);
+                ml.get_key(LLM_KV_ROPE_DIMENSION_COUNT,     hparams.n_rot, false);               // number of rotary dimensions
+                //ml.get_key(LLM_KV_ATTENTION_KEY_LENGTH,     hparams.n_embd_head_k, false);       // key dimension per head
+                //ml.get_key(LLM_KV_ATTENTION_VALUE_LENGTH,   hparams.n_embd_head_v, false);       // value dimension per head
+                //num_attention_heads
+
+                // Determine model type based on the number of layers:
+                switch (hparams.n_layer) {
+                    case 21:
+                        type = LLM_TYPE_150M;
+                        break;
+                    case 28:
+                        type = LLM_TYPE_396M;
+                        break;
+                    default:
+                        type = LLM_TYPE_UNKNOWN;
+                }
+            }
+            break;
         default: throw std::runtime_error("unsupported model architecture");
     }
 
@@ -3427,6 +3462,58 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                     output   = create_tensor(tn(LLM_TENSOR_OUTPUT, "weight"), {hparams.convnext.n_embd, n_embd}, 0);
                     output_b = create_tensor(tn(LLM_TENSOR_OUTPUT, "bias"),   {n_embd}, 0);
                 } break;
+            case LLM_ARCH_MODERNBERT:
+                {
+                    fprintf(stderr, "LOADING MODERNBERT TENSORS!\n");
+                    // ModernBERT is a bidirectional masked language model that does not use token type or
+                    // absolute positional embeddings. Instead it uses rotary positional embeddings.
+                    // Create the token embedding tensor.
+                    tok_embd = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), { n_embd, n_vocab }, 0);
+                    tok_norm = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD_NORM, "weight"), { n_embd }, 0);
+                    fprintf(stderr, "loaded tok embd & norm %p\n", tok_norm);
+
+                    uint32_t dim = n_embd / hparams.n_head_arr[0]; //hparams.n_embd_head_v; //hparams.n_head_arr[0]; //hidden_size / n_embd_head
+                    uint32_t inv_freq_size = dim / 2; // (hparams.n_rot / 2) ???
+                    
+                    
+                    
+                    // Create transformer layers.
+                    fprintf(stderr, "pre-layer!\n");
+                    for (int i = 0; i < n_layer; ++i) {
+                        auto & layer = layers[i];
+                        fprintf(stderr, "post-layer?\n");
+
+                        // The attention submodule:
+                        // - The layer norm for attention is unchanged.
+                        if (i > 0) {
+                            layer.attn_norm = create_tensor(tn(LLM_TENSOR_ATTN_NORM, i), { n_embd }, 0);
+                            fprintf(stderr, "post ATTN_NORM!\n");
+                        }
+                        fprintf(stderr, "loading rope inv_freq!\n");
+                        inv_freq = create_tensor(tn(LLM_TENSOR_ROPE_INV_FREQ, i), { inv_freq_size }, 0);
+                        fprintf(stderr, "loaded rope inv_freq!\n");
+                        layer.wqkv = create_tensor(tn(LLM_TENSOR_ATTN_QKV, i), { n_embd, 3 * n_embd }, 0);
+                        fprintf(stderr, "post ATTN_QKV!\n");
+                        layer.wo = create_tensor(tn(LLM_TENSOR_ATTN_OUT, i), { n_embd, n_embd }, 0);
+                        fprintf(stderr, "loaded ATTN_OUT!!\n");
+                        // The MLP (feed-forward) submodule:
+                        // ModernBERT’s MLP typically uses a normalization followed by a linear layer for the gate (Wi)
+                        // and another linear layer for the output (Wo). (There is no separate "down" projection.)
+                        layer.ffn_norm = create_tensor(tn(LLM_TENSOR_FFN_NORM, i), { n_embd }, 0);
+                        fprintf(stderr, "loaded ffn_norm!\n\n\n\n");
+                        layer.ffn_gate = create_tensor(tn(LLM_TENSOR_FFN_DOWN, i), { n_ff, n_embd }, 0);
+                        fprintf(stderr, "loaded ffn_down!\n\n\n\n");
+                        layer.ffn_up   = create_tensor(tn(LLM_TENSOR_FFN_UP, i), { n_embd, 2* n_ff }, 0);
+                        fprintf(stderr, "loaded ffn up!\n");
+                    }
+                    // For output, ModernBERT typically reuses the token embedding weights.
+                    fprintf(stderr, "loading output_norm!\n");
+                    output_norm = create_tensor(tn(LLM_TENSOR_OUTPUT_NORM), { n_embd }, 0);
+                    //fprintf(stderr, "loading output!\n");
+                    //output = create_tensor(tn(LLM_TENSOR_OUTPUT, "weight"), { n_embd, n_vocab }, TENSOR_DUPLICATED);
+                    fprintf(stderr, "finished loading modernbert tensors!\n");
+                }
+                break;
             default:
                 throw std::runtime_error("unknown architecture");
         }
@@ -3712,6 +3799,13 @@ void llama_model::print_info() const {
         LLAMA_LOG_INFO("%s: f_attention_scale = %f\n", __func__, hparams.f_attention_scale);
     }
 
+    if (arch == LLM_ARCH_MODERNBERT) {
+        LLAMA_LOG_INFO("%s: local_attention = %f\n", __func__, hparams.local_attention);
+        LLAMA_LOG_INFO("%s: global_attn_every_n_layers  = %f\n", __func__, hparams.global_attn_every_n_layers);
+        LLAMA_LOG_INFO("%s: rope_local_theta = %f\n", __func__, hparams.rope_local_theta);
+        LLAMA_LOG_INFO("%s: rope_global_theta = %f\n", __func__, hparams.rope_global_theta);
+    }
+
     vocab.print_info();
 }
 
@@ -3866,6 +3960,7 @@ int32_t llama_n_head(const struct llama_model * model) {
 }
 
 enum llama_rope_type llama_model_rope_type(const struct llama_model * model) {
+    fprintf(stderr, "MODEL ARCHITECTURE: %d\n", model->arch);
     switch (model->arch) {
         // these models do not use RoPE
         case LLM_ARCH_GPT2:
@@ -3930,6 +4025,7 @@ enum llama_rope_type llama_model_rope_type(const struct llama_model * model) {
         case LLM_ARCH_NEMOTRON:
         case LLM_ARCH_EXAONE:
         case LLM_ARCH_MINICPM3:
+        case LLM_ARCH_MODERNBERT:
             return LLAMA_ROPE_TYPE_NEOX;
 
         case LLM_ARCH_QWEN2VL:
@@ -3937,7 +4033,7 @@ enum llama_rope_type llama_model_rope_type(const struct llama_model * model) {
 
         // all model arches should be listed explicitly here
         case LLM_ARCH_UNKNOWN:
-            GGML_ABORT("unknown architecture");
+            GGML_ABORT("unknown architecture: %d", model->arch);
     }
 
     return LLAMA_ROPE_TYPE_NONE;

@@ -3223,6 +3223,179 @@ class XLMRobertaModel(BertModel):
 
         return super().modify_tensors(data_torch, name, bid)
 
+@Model.register("ModernBertModel", "ModernBertForMaskedLM")
+class ModernBertModel(Model):
+    model_arch = gguf.MODEL_ARCH.MODERNBERT  # For now, use BERT arch until MODERNBERT is added
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.vocab_size = None
+        self.tensor_map = gguf.get_tensor_name_map(self.model_arch, self.hparams.get("num_hidden_layers", 0))
+
+    def get_vocab_base_pre(self, tokenizer) -> str:
+        """Override base pre-tokenization settings for ModernBERT."""
+        from transformers import PreTrainedTokenizerFast
+        
+        if not isinstance(tokenizer, PreTrainedTokenizerFast):
+            return "bert"  # Default to bert if not using fast tokenizer
+            
+        # Return bert pre-tokenizer type for ModernBERT
+        return "bert"
+
+    def set_gguf_parameters(self):
+        # Don't call super().set_gguf_parameters() to avoid duplicate parameter setting
+        
+        # Required parameters
+        print("hparams: ", self.hparams)
+        self.gguf_writer.add_causal_attention(True)
+        self.gguf_writer.add_file_type(1)  # 1 = pretrained
+        
+        # Add RoPE parameters
+        if "global_rope_theta" in self.hparams:
+            self.gguf_writer.add_rope_global_theta(self.hparams["global_rope_theta"])
+        if "global_attn_every_n_layers" in self.hparams:
+            self.gguf_writer.add_global_attn_every_n_layers(self.hparams["global_attn_every_n_layers"])
+
+        if "local_rope_theta" in self.hparams:
+            self.gguf_writer.add_rope_local_theta(self.hparams["local_rope_theta"])
+        if "local_attention" in self.hparams:
+            self.gguf_writer.add_local_attention(self.hparams["local_attention"])
+
+        # Add pooling type based on config
+        pooling_type = gguf.PoolingType.CLS if self.hparams.get("classifier_pooling", "cls") == "cls" else gguf.PoolingType.MEAN
+        self.gguf_writer.add_pooling_type(pooling_type)
+
+        # Architecture parameters
+        if "hidden_size" in self.hparams:
+            self.gguf_writer.add_embedding_length(self.hparams["hidden_size"])
+            
+        if "intermediate_size" in self.hparams:
+            self.gguf_writer.add_feed_forward_length(self.hparams["intermediate_size"])
+            
+        if "num_attention_heads" in self.hparams:
+            self.gguf_writer.add_head_count(self.hparams["num_attention_heads"])
+            
+        if "num_hidden_layers" in self.hparams:
+            self.gguf_writer.add_block_count(self.hparams["num_hidden_layers"])
+            
+        # Layer parameters
+        if "layer_norm_eps" in self.hparams:
+            self.gguf_writer.add_layer_norm_eps(self.hparams["layer_norm_eps"])
+        
+        # Handle context length last to avoid duplicates
+        if "max_position_embeddings" in self.hparams:
+            self.gguf_writer.add_context_length(self.hparams["max_position_embeddings"])
+                # Calculate the rotary embedding inverse frequencies
+        
+        # Compute inverse frequency
+        dim = self.hparams["hidden_size"] // self.hparams["num_attention_heads"]
+        n_rot = dim  # Modernbert typically uses the full head dimension for RoPE
+        inv_freq_size = n_rot // 2
+        
+        # Create the inverse frequency tensor data
+        rope_theta = self.hparams.get("rope_theta", 10000.0)
+        inv_freq = np.array([
+            1.0 / (rope_theta ** (2.0 * i / n_rot)) 
+            for i in range(0, inv_freq_size)
+        ], dtype=np.float32)
+
+        print(f"INV_FREQ IS OF LENGTH {len(inv_freq)}, {inv_freq_size} {self.hparams["hidden_size"]} {self.hparams["num_attention_heads"]} {dim}")
+        
+        # Add to the GGUF file
+        for layer in range(0, self.hparams["num_hidden_layers"]):
+            self.gguf_writer.add_tensor(f"blk.{layer}.rope_inv_freq", inv_freq)
+            print(f"blk.{layer}.rope_inv_freq")
+            #"layers.{bid}.attn_norm",
+
+
+    def set_vocab(self):
+        tokens, toktypes, tokpre = self.get_vocab_base()
+        self.vocab_size = len(tokens)
+
+        # Add token type count for position embeddings
+        #self.gguf_writer.add_token_type_count(1)  # ModernBERT doesn't use token type embeddings
+        self.gguf_writer.add_token_type_count(1)  # Adjust to 0 since ModernBERT doesn't use token type embeddings
+        # 171 tensors
+
+        # Convert to phantom space vocab
+        def phantom(tok):
+            if tok.startswith("[") and tok.endswith("]"):
+                return tok
+            if tok.startswith("##"):
+                return tok[2:]
+            return "\u2581" + tok
+        tokens = list(map(phantom, tokens))
+
+        # Add vocab info to GGUF
+        self.gguf_writer.add_tokenizer_model("bert")
+        self.gguf_writer.add_tokenizer_pre(tokpre)
+        self.gguf_writer.add_token_list(tokens)
+        self.gguf_writer.add_token_types(toktypes)
+        different = []
+        for toktype in toktypes:
+            if toktype not in different:
+                different.append(toktype)
+        #print(different)
+        
+
+        # Handle special tokens
+        special_vocab = gguf.SpecialVocab(self.dir_model, n_vocab=len(tokens))
+        special_vocab.add_to_gguf(self.gguf_writer)
+        #print(special_vocab)
+        #print(self.hparams.get("type_vocab_size", 1))
+        #print(self.hparams)
+        #sys.exit()
+
+    def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
+        # Handle model prefix
+        print("tensor: ", name, bid)
+        if name.startswith("model."):
+            name = name[6:]  # Remove "model." prefix
+        
+        # Handle special cases first
+        if name == "decoder.bias":
+            if not self.hparams.get("decoder_bias", True):
+                return []  # Skip if decoder bias is disabled
+            return [] #[("head_bias", data_torch)]
+
+        # Skip classifier layers if not needed
+        if name.startswith(("head.dense", "head.norm", "decoder")):
+            if not self.hparams.get("include_head", True):
+                print("RETURNING NULL FOR ", "head.dense", "head.norm", "decoder")
+                return []
+                # Handle layer tensors
+        
+        #if "final_norm.weight" in name:
+            #print("Found final_norm.weight!", name)
+
+        if bid is not None:
+            # Layer tensor mappings
+            LAYER_MAPPING = {
+                f"layers.{bid}.attn.Wqkv.weight": f"blk.{bid}.attn_qkv",
+                f"layers.{bid}.attn.Wo.weight": f"blk.{bid}.attn_output",
+                f"layers.{bid}.attn_norm.weight": f"blk.{bid}.attn_norm",
+                f"layers.{bid}.mlp.Wi.weight": f"blk.{bid}.ffn_up",
+                f"layers.{bid}.mlp.Wo.weight": f"blk.{bid}.ffn_down",
+                f"layers.{bid}.mlp_norm.weight": f"blk.{bid}.ffn_norm"
+            }
+            
+            if name in LAYER_MAPPING:
+                print(LAYER_MAPPING[name])
+                return [(LAYER_MAPPING[name], data_torch)]
+                
+        try:
+            mapped_name = self.map_tensor_name(name)
+            return [(mapped_name, data_torch)]
+        except ValueError:
+            return []  # Skip tensors that don't have a mapping
+
+    def map_tensor_name(self, name: str, try_suffixes: Sequence[str] = (".weight", ".bias")) -> str:
+        """Map HF tensor names to GGUF names using the tensor map."""
+        new_name = self.tensor_map.get_name(key=name, try_suffixes=try_suffixes)
+        if new_name is None:
+            raise ValueError(f"Can not map tensor {name!r}")
+        return new_name
+
 
 @Model.register("GemmaForCausalLM")
 class GemmaModel(Model):

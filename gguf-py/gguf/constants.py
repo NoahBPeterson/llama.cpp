@@ -134,6 +134,8 @@ class Keys:
         REL_BUCKETS_COUNT = "{arch}.attention.relative_buckets_count"
         SLIDING_WINDOW    = "{arch}.attention.sliding_window"
         SCALE             = "{arch}.attention.scale"
+        LOCAL_ATTENTION    = "{arch}.attention.local_attention"
+        GLOBAL_ATTN_EVERY_N_LAYERS    = "{arch}.attention.global_attn_every_n_layers"
 
     class Rope:
         DIMENSION_COUNT         = "{arch}.rope.dimension_count"
@@ -145,6 +147,9 @@ class Keys:
         SCALING_ORIG_CTX_LEN    = "{arch}.rope.scaling.original_context_length"
         SCALING_FINETUNED       = "{arch}.rope.scaling.finetuned"
         SCALING_YARN_LOG_MUL    = "{arch}.rope.scaling.yarn_log_multiplier"
+#### MODERNBERT
+        ROPE_GLOBAL_THETA    = "{arch}.rope.scaling.global_theta"
+        ROPE_LOCAL_THETA    = "{arch}.rope.scaling.local_theta"
 
     class Split:
         LLM_KV_SPLIT_NO            = "split.no"
@@ -236,6 +241,7 @@ class MODEL_ARCH(IntEnum):
     BERT             = auto()
     NOMIC_BERT       = auto()
     JINA_BERT_V2     = auto()
+    MODERNBERT       = auto()
     BLOOM            = auto()
     STABLELM         = auto()
     QWEN             = auto()
@@ -406,6 +412,9 @@ class MODEL_TENSOR(IntEnum):
     POSNET_ATTN_K        = auto()
     POSNET_ATTN_V        = auto()
     POSNET_ATTN_OUT      = auto()
+    HEAD_NORM            = auto()
+    HEAD_DENSE           = auto()
+    HEAD_BIAS            = auto()
 
 
 MODEL_ARCH_NAMES: dict[MODEL_ARCH, str] = {
@@ -466,6 +475,7 @@ MODEL_ARCH_NAMES: dict[MODEL_ARCH, str] = {
     MODEL_ARCH.GRANITE_MOE:      "granitemoe",
     MODEL_ARCH.CHAMELEON:        "chameleon",
     MODEL_ARCH.WAVTOKENIZER_DEC: "wavtokenizer-dec",
+    MODEL_ARCH.MODERNBERT:       "modernbert",
 }
 
 TENSOR_NAMES: dict[MODEL_TENSOR, str] = {
@@ -1536,6 +1546,28 @@ MODEL_TENSORS: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
         MODEL_TENSOR.POSNET_ATTN_K,
         MODEL_TENSOR.POSNET_ATTN_V,
         MODEL_TENSOR.POSNET_ATTN_OUT,
+    ],
+    MODEL_ARCH.MODERNBERT: [
+        # Embedding block
+        MODEL_TENSOR.TOKEN_EMBD,       # token embeddings (from embeddings.tok_embeddings)
+        MODEL_TENSOR.TOKEN_EMBD_NORM,  # norm applied to token embeddings (from embeddings.norm)
+        
+        # Final transformer normalization
+        MODEL_TENSOR.OUTPUT_NORM,      # from final_norm
+
+        # Transformer block (applied per layer; these keys will be used inside each block)
+        MODEL_TENSOR.ATTN_NORM,        # pre-attention norm (attn_norm)
+        MODEL_TENSOR.ATTN_QKV,         # combined QKV weights (from attn.Wqkv)
+        MODEL_TENSOR.ATTN_OUT,         # output projection weight (from attn.Wo)
+        MODEL_TENSOR.FFN_NORM,         # pre-MLP norm (mlp_norm)
+        MODEL_TENSOR.FFN_UP,           # MLP up-projection weight (from mlp.Wi)
+        MODEL_TENSOR.FFN_DOWN,         # MLP down-projection weight (from mlp.Wo)
+
+        # LM head (prediction head + decoder)
+        MODEL_TENSOR.HEAD_NORM,        # normalization in the prediction head (head.norm)
+        MODEL_TENSOR.HEAD_DENSE,       # dense layer of the prediction head (head.dense)
+        MODEL_TENSOR.HEAD_BIAS,        # bias for the prediction head (if present)
+        MODEL_TENSOR.OUTPUT,           # final decoder weight mapping to vocab (decoder)
     ],
     # TODO
 }

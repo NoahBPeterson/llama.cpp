@@ -24,11 +24,13 @@ enum llm_type {
     LLM_TYPE_80M,
     LLM_TYPE_109M,
     LLM_TYPE_137M,
+    LLM_TYPE_150M,
     LLM_TYPE_160M,
     LLM_TYPE_220M,
     LLM_TYPE_250M,
     LLM_TYPE_270M,
     LLM_TYPE_335M,
+    LLM_TYPE_396M,
     LLM_TYPE_410M,
     LLM_TYPE_450M,
     LLM_TYPE_770M,
@@ -300,6 +302,7 @@ struct llama_model {
     struct ggml_tensor * pos_embd   = nullptr;
     struct ggml_tensor * tok_norm   = nullptr;
     struct ggml_tensor * tok_norm_b = nullptr;
+    struct ggml_tensor * inv_freq   = nullptr;
 
     struct ggml_tensor * output_norm     = nullptr;
     struct ggml_tensor * output_norm_b   = nullptr;

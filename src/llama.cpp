@@ -8110,7 +8110,273 @@ struct llm_build_context {
 
         return gf;
     }
+
+    struct ggml_cgraph * build_modernbert() {
+        // Create a new computation graph.
+        struct ggml_cgraph * gf = ggml_new_graph_custom(ctx0, model.max_nodes(), false);
+        const int64_t n_embd_head = hparams.n_embd_head_v;
+
+        // === Embedding Layer ===
+        // ModernBERT’s embedding module consists of:
+        //   - a token embedding lookup (tok_embeddings)
+        //   - a normalization (norm)
+        //   - and a dropout (drop) [typically disabled at inference].
+        // We build the input embeddings as follows:
+        struct ggml_tensor * inp = llm_build_inp_embd(ctx0, lctx, hparams, ubatch, model.tok_embd, cb);
+        // Apply the embedding normalization (dropout is skipped during inference).
+        inp = llm_build_norm(ctx0, inp, hparams, model.tok_norm, nullptr, LLM_NORM, cb, -1);
+
+        // Build a positional tensor for rotary embeddings.
+        // (ModernBERT does not use absolute positional embeddings.)
+        struct ggml_tensor * inp_pos = build_inp_pos();
+
+        //int n = n_rot / 2;
+        uint32_t hidden_size = hparams.n_embd;
+        int dim = hidden_size / n_embd_head; //config.num_attention_heads;
+
+        // === Encoder Layers ===
+        // Process each ModernBERT encoder layer.
+        for (uint32_t i = 0; i < hparams.n_layer; ++i) {
+            // Save input for the residual connection.
+            struct ggml_tensor * inp_res = inp;
+
+            // --- Attention Block ---
+            // (ModernBERT’s attention module uses a “combined” QKV linear layer.)
+            // Apply (pre-)attention normalization. In some layers this may be an identity.
+            struct ggml_tensor * attn_in = llm_build_norm(ctx0, inp, hparams, model.layers[i].attn_norm, nullptr, LLM_NORM, cb, i);
+            // Compute the combined QKV output.
+            struct ggml_tensor * qkv = llm_build_lora_mm(lctx, ctx0, model.layers[i].wqkv, attn_in);
+            // Split the combined tensor into Q, K, and V.
+            // (We assume each has size equal to hparams.n_embd.)
+            //struct ggml_tensor * Q, *K, *V;
+            //split_qkv(qkv, &Q, &K, &V, hparams.n_embd);
+            size_t hs = hidden_size * ggml_element_size(qkv);
+
+            fprintf(stderr, "hs: %d\n", hs);
+            // Create views into qkv for Q, K, and V.
+            struct ggml_tensor * Q = ggml_view_2d(ctx0, qkv, hidden_size, n_tokens, qkv->nb[1], 0 * hs);
+            struct ggml_tensor * K = ggml_view_2d(ctx0, qkv, hidden_size, n_tokens, qkv->nb[1], 1 * hs);
+            struct ggml_tensor * V = ggml_view_2d(ctx0, qkv, hidden_size, n_tokens, qkv->nb[1], 2 * hs);
+
+            fprintf(stderr, "Num elements, Q: %d %d %d %d\n", Q->nb[0], Q->nb[1], Q->nb[2], Q->nb[3]);
+            // Elements 12288 25165824 25165824
+            fprintf(stderr, "Num elements, K: %d %d %d %d\n", K->nb[0], K->nb[1], K->nb[2], K->nb[3]);
+            // Elements 12288 25165824 25165824
+            fprintf(stderr, "Num elements, V: %d %d %d %d\n", V->nb[0], V->nb[1], V->nb[2], V->nb[3]);
+            // Elements 12288 25165824 25165824
+
+
+            // Apply rotary positional embeddings to Q and K.
+            // (The helper function ggml_rope_ext applies the rotary transform
+            // given a position tensor, the rotary parameters stored in rotary_emb,
+            // and hyperparameters such as the number of rotary dimensions.)
+
+            // custom RoPE
+            // c is freq factors (e.g. phi3-128k), (optional)
+            // Reshape Q and K to 3D tensors: (n_embd_head, n_head, n_tokens)
+            fprintf(stderr, "Reshaping Q\n");
+            fprintf(stderr, "Q is contiguous? %d\n", ggml_is_contiguous(Q));
+            Q = ggml_cont(ctx0, Q);
+            fprintf(stderr, "Ran ggml_cont(ctx0, Q). Now Q is contiguous? %d\n", ggml_is_contiguous(Q));
+            fprintf(stderr, "Num elements, Q: %d %d %d %d\n", Q->nb[0], Q->nb[1], Q->nb[2], Q->nb[3]);
+            Q = ggml_reshape_3d(ctx0, Q, n_embd_head, n_head, n_tokens);
+            fprintf(stderr, "Reshaping K\n");
+            K = ggml_cont(ctx0, K);
+            K = ggml_reshape_3d(ctx0, K, n_embd_head, n_head, n_tokens);
+            V = ggml_cont(ctx0, V);
+            V = ggml_reshape_3d(ctx0, V, n_embd_head, n_head, n_tokens);
+
+            fprintf(stderr, "Made it 1!\n");
+            Q = ggml_rope_ext(ctx0, Q, inp_pos, model.inv_freq, //model.layers[i].rope_freqs,
+                            hparams.n_rot, hparams.rope_type, hparams.n_ctx_train,
+                            hparams.rope_freq_base_train, hparams.rope_freq_scale_train, 0.0f, 0.0f, 0.0f, 0.0f );
+            fprintf(stderr, "Made it 2!\n");
+            K = ggml_rope_ext(ctx0, K, inp_pos, model.inv_freq, //model.layers[i].rope_freqs,
+                            hparams.n_rot, hparams.rope_type, hparams.n_ctx_train,
+                            hparams.rope_freq_base_train, hparams.rope_freq_scale_train, 0.0f, 0.0f, 0.0f, 0.0f );
+            fprintf(stderr, "Num elements post-rope, Q: %d %d %d %d\n", Q->nb[0], Q->nb[1], Q->nb[2], Q->nb[3]);
+            fprintf(stderr, "Num elements post-rope, K: %d %d %d %d\n", K->nb[0], K->nb[1], K->nb[2], K->nb[3]);
+            fprintf(stderr, "ne post-rope, Q: %d %d %d %d\n", Q->ne[0], Q->ne[1], Q->ne[2], Q->ne[3]);
+            fprintf(stderr, "ne post-rope, K: %d %d %d %d\n", K->ne[0], K->ne[1], K->ne[2], K->ne[3]);
+            fprintf(stderr, "ne post-rope, V: %d %d %d %d\n", V->ne[0], V->ne[1], V->ne[2], V->ne[3]);
+            Q = ggml_permute(ctx0, Q, 0, 2, 1, 3); // [n_embd_head, n_tokens, n_head]
+            K = ggml_permute(ctx0, K, 0, 2, 1, 3); // [n_embd_head, n_tokens, n_head]
+            V = ggml_permute(ctx0, V, 1, 2, 0, 3);
+            //V = ggml_permute(ctx0, V, 0, 2, 1, 3); // [n_embd_head, n_tokens, n_head]
+            fprintf(stderr, "ne post-permute, Q: %d %d %d %d\n", Q->ne[0], Q->ne[1], Q->ne[2], Q->ne[3]);
+            fprintf(stderr, "ne post-permute, K: %d %d %d %d\n", K->ne[0], K->ne[1], K->ne[2], K->ne[3]);
+            fprintf(stderr, "ne post-permute, V: %d %d %d %d\n", V->ne[0], V->ne[1], V->ne[2], V->ne[3]);
+            struct ggml_tensor * K_TRANS = ggml_transpose(ctx0, K);
+            fprintf(stderr, "ne post-transpose, K_T: %d %d %d %d\n", K_TRANS->ne[0], K_TRANS->ne[1], K_TRANS->ne[2], K_TRANS->ne[3]);
+            fprintf(stderr, "Made it 3!\n");
+            // Compute scaled dot‑product attention.
+            struct ggml_tensor * attn_scores = ggml_mul_mat(ctx0, Q, K); //ggml_transpose(ctx0, K)); //ggml_transpose(ctx0, K));
+            fprintf(stderr, "Made it 4!\n");
+            attn_scores = ggml_scale(ctx0, attn_scores, 1.0f / sqrtf((float)hparams.n_embd_head_k));
+            fprintf(stderr, "nb post-rope, attn_scores: %d %d %d %d\n", attn_scores->nb[0], attn_scores->nb[1], attn_scores->nb[2], attn_scores->nb[3]);
+            fprintf(stderr, "ne post-rope, attn_scores: %d %d %d %d\n", attn_scores->ne[0], attn_scores->ne[1], attn_scores->ne[2], attn_scores->ne[3]);
+            fprintf(stderr, "Made it 5!\n");
+            attn_scores = ggml_soft_max(ctx0, attn_scores);
+            fprintf(stderr, "Made it 6!\n");
+            fprintf(stderr, "nb post-soft-max, attn_scores: %d %d %d %d\n", attn_scores->nb[0], attn_scores->nb[1], attn_scores->nb[2], attn_scores->nb[3]);
+            fprintf(stderr, "ne post-soft-max, attn_scores: %d %d %d %d\n", attn_scores->ne[0], attn_scores->ne[1], attn_scores->ne[2], attn_scores->ne[3]);
+            
+            // DEBUG 
+            struct ggml_tensor * V_compat = ggml_cont(ctx0, V);
+            fprintf(stderr, "ne attn_scores before mul: %d %d %d %d\n", 
+                    attn_scores->ne[0], attn_scores->ne[1], attn_scores->ne[2], attn_scores->ne[3]);
+            fprintf(stderr, "ne V_compat before mul: %d %d %d %d\n", 
+                    V_compat->ne[0], V_compat->ne[1], V_compat->ne[2], V_compat->ne[3]);
+            // DEBUG OUTPUT
+
+            struct ggml_tensor * attn_out = ggml_mul_mat(ctx0, attn_scores, V);
+            fprintf(stderr, "Made it 7!\n");
+
+            fprintf(stderr, "ne attn_out post multiplication: %d %d %d %d\n", 
+                    attn_out->ne[0], attn_out->ne[1], attn_out->ne[2], attn_out->ne[3]);
+            fprintf(stderr, "ne inp_res shape: %d %d %d %d\n", 
+                    inp_res->ne[0], inp_res->ne[1], inp_res->ne[2], inp_res->ne[3]);
+            attn_out = ggml_cont(ctx0, attn_out);
+
+            // Note: 64 * 16 = 1024, which is exactly the first dimension we need
+            // We can directly reshape from [2048, 64, 16, 1] to [1024, 2048]
+            attn_out = ggml_reshape_2d(ctx0, attn_out, 1024, 2048);
+
+            fprintf(stderr, "ne attn_out after reshape: %d %d %d %d\n", 
+                    attn_out->ne[0], attn_out->ne[1], attn_out->ne[2], attn_out->ne[3]);
+
+            // Project attention output using the linear layer Wo.
+            if (i > 0) {
+                fprintf(stderr, "Made it 8!\n");
+                attn_out = llm_build_lora_mm(lctx, ctx0, model.layers[i].attn_out_norm, attn_out);
+            }
+            // Add the attention output to the original input (residual connection).
+            struct ggml_tensor * attn_res = ggml_add(ctx0, inp_res, attn_out);
+            fprintf(stderr, "Made it 9!\n");
+
+            // --- MLP Block ---
+            // Apply the MLP normalization.
+            // After normalization
+            // After normalization
+            struct ggml_tensor * mlp_in = llm_build_norm(ctx0, attn_res, hparams, model.layers[i].ffn_norm, nullptr, LLM_NORM, cb, i);
+            fprintf(stderr, "Made it 10!\n");
+            fprintf(stderr, "ne mlp_in dimensions: %d %d %d %d\n", 
+                    mlp_in->ne[0], mlp_in->ne[1], mlp_in->ne[2], mlp_in->ne[3]);
+
+            // First linear projection (Wi) outputs 2*intermediate_size for GeGLU 
+            struct ggml_tensor * gelu_gate = llm_build_lora_mm(lctx, ctx0, model.layers[i].ffn_up, mlp_in);
+            fprintf(stderr, "Made it 11!\n");
+            fprintf(stderr, "ne gelu_gate dimensions: %d %d %d %d\n", 
+                    gelu_gate->ne[0], gelu_gate->ne[1], gelu_gate->ne[2], gelu_gate->ne[3]);
+
+            // Calculate actual intermediate size (half of the ffn_up output)
+            int intermediate_size = gelu_gate->ne[0] / 2;
+            fprintf(stderr, "Intermediate size: %d\n", intermediate_size);
+
+            // Split the tensor into two halves
+            struct ggml_tensor * gelu_part = ggml_view_2d(ctx0, gelu_gate, 
+                                                    intermediate_size, gelu_gate->ne[1], 
+                                                    gelu_gate->nb[1], 0);
+                                                    
+            struct ggml_tensor * gate_part = ggml_view_2d(ctx0, gelu_gate, 
+                                                    intermediate_size, gelu_gate->ne[1], 
+                                                    gelu_gate->nb[1], intermediate_size * ggml_element_size(gelu_gate));
+
+            // Apply GELU to first half only
+            gelu_part = ggml_gelu(ctx0, gelu_part);
+
+            // Multiply (element-wise) the GELU output with the gate
+            struct ggml_tensor * geglu_out = ggml_mul(ctx0, gelu_part, gate_part);
+            fprintf(stderr, "ne geglu_out dimensions: %d %d %d %d\n", 
+                    geglu_out->ne[0], geglu_out->ne[1], geglu_out->ne[2], geglu_out->ne[3]);
+
+            // Make sure tensor is contiguous
+            //geglu_out = ggml_cont(ctx0, geglu_out);
+
+            // After applying GeGLU
+            fprintf(stderr, "ne geglu_out dimensions: %d %d %d %d\n", 
+                    geglu_out->ne[0], geglu_out->ne[1], geglu_out->ne[2], geglu_out->ne[3]);
+
+            // Debug ffn_gate in more detail
+            fprintf(stderr, "ffn_gate details:\n");
+            fprintf(stderr, "ffn_gate address: %p\n", model.layers[i].ffn_gate);
+            if (model.layers[i].ffn_gate != nullptr) {
+                fprintf(stderr, "ffn_gate dimensions: [%d, %d]\n", 
+                        model.layers[i].ffn_gate->ne[0], model.layers[i].ffn_gate->ne[1]);
+            }
+
+            // Try an alternative approach for MLP projection
+            if (model.layers[i].ffn_down != nullptr) {
+                fprintf(stderr, "Using ffn_down instead of ffn_gate\n");
+                struct ggml_tensor * mlp_out = llm_build_lora_mm(lctx, ctx0, model.layers[i].ffn_down, geglu_out);
+                // Rest of code...
+            } else {
+                // Since direct matrix multiplication doesn't work, let's try a workaround
+                // First reshape geglu_out to match expected input shape
+                fprintf(stderr, "Using alternate approach\n");
+                
+                // Try explicit reshape instead of transpose
+                geglu_out = ggml_reshape_2d(ctx0, geglu_out, inp_res->ne[0], inp_res->ne[1]);
+                fprintf(stderr, "Reshaped geglu_out to match input: [%d, %d]\n",
+                        geglu_out->ne[0], geglu_out->ne[1]);
+                // Create a temporary matrix with compatible dimensions for testing
+                //struct ggml_tensor * temp_proj = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, 2624, 1024);
+                //fprintf(stderr, "Created temp projection: [%d, %d]\n", temp_proj->ne[0], temp_proj->ne[1]);
+                
+                // Use this temporary matrix for testing matrix multiplication
+                struct ggml_tensor * mlp_out = geglu_out;
+                fprintf(stderr, "mlp_out dimensions: %d %d %d %d\n", 
+                        mlp_out->ne[0], mlp_out->ne[1], mlp_out->ne[2], mlp_out->ne[3]);
+                fprintf(stderr, "Test mlp_out dimensions: %d %d %d %d\n", 
+                        mlp_out->ne[0], mlp_out->ne[1], mlp_out->ne[2], mlp_out->ne[3]);
+                
+                // If that works, try with the actual ffn_gate
+                mlp_out = ggml_reshape_2d(ctx0, mlp_out, inp_res->ne[0], inp_res->ne[1]);
+                fprintf(stderr, "Final mlp_out dimensions: %d %d %d %d\n", 
+                        mlp_out->ne[0], mlp_out->ne[1], mlp_out->ne[2], mlp_out->ne[3]);
+                
+                // Add the MLP output (residual)
+                inp = ggml_add(ctx0, attn_res, mlp_out);
+                continue;
+            }
+
+            // Skip using llm_build_lora_mm for now and use direct matrix multiplication
+            fprintf(stderr, "Preparing for direct matrix multiplication\n");
+
+            // Transpose geglu_out to match dimensions
+            struct ggml_tensor * geglu_trans = ggml_transpose(ctx0, geglu_out);
+            fprintf(stderr, "After transpose, geglu_trans: [%d, %d]\n",
+                    geglu_trans->ne[0], geglu_trans->ne[1]);
+
+            // Direct matrix multiplication
+            struct ggml_tensor * mlp_out = ggml_mul_mat(ctx0, geglu_trans, model.layers[i].ffn_gate);
+            fprintf(stderr, "Initial mlp_out dimensions: %d %d %d %d\n",
+                    mlp_out->ne[0], mlp_out->ne[1], mlp_out->ne[2], mlp_out->ne[3]);
+
+            // Transpose result back to match expected dimensions for residual connection
+            mlp_out = ggml_transpose(ctx0, mlp_out);
+            fprintf(stderr, "Final mlp_out dimensions: %d %d %d %d\n",
+                    mlp_out->ne[0], mlp_out->ne[1], mlp_out->ne[2], mlp_out->ne[3]);
+
+            // Add the MLP output (residual)
+            inp = ggml_add(ctx0, attn_res, mlp_out);
+            fprintf(stderr, "Made it 13!\n");
+        }
+
+        // === Final Normalization ===
+        // Apply the final layer norm (model.final_norm) to the output of the encoder stack.
+        struct ggml_tensor * output = llm_build_norm(ctx0, inp, hparams, model.output_norm, nullptr, LLM_NORM, cb, -1);
+        fprintf(stderr, "Made it 15!\n");
+
+        // Mark the final tensor as the output of the graph.
+        ggml_build_forward_expand(gf, output);
+
+        return gf;
+    }
+
+
 };
+
 
 static struct ggml_cgraph * llama_build_graph_defrag(llama_context & lctx, const std::vector<uint32_t> & ids) {
     llama_ubatch dummy = {};
@@ -8401,6 +8667,10 @@ static struct ggml_cgraph * llama_build_graph(
         case LLM_ARCH_WAVTOKENIZER_DEC:
             {
                 result = llm.build_wavtokenizer_dec();
+            } break;
+        case LLM_ARCH_MODERNBERT:
+            {
+                result = llm.build_modernbert();
             } break;
         default:
             GGML_ABORT("fatal error");
