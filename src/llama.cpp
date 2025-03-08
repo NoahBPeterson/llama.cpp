@@ -8145,11 +8145,8 @@ struct llm_build_context {
         // When using this mask, the caller would need to initialize it with the appropriate windowed pattern
         // where each token can only attend to tokens within a window of size "window_size" centered on it
         
-        //return flash_attn ? ggml_cast(ctx0, mask, GGML_TYPE_F16) : mask;
-        
         struct ggml_tensor * KQ_mask_local = flash_attn ? ggml_cast(ctx0, mask, GGML_TYPE_F16) : mask;
         fprintf(stderr, "7\n");
-                //build_inp_KQ_mask_window(false, window_size);
 
         // Constants for ModernBERT RoPE settings
         const float rope_freq_base_global = 10000.0f * 16.0f; // 160,000 for global attention
@@ -8233,39 +8230,9 @@ struct llm_build_context {
                     beta_fast, 
                     beta_slow
                 );
-                /*fprintf(stderr, "9e: Applied RoPE to K\n");
-
-                fprintf(stderr, "ne wo: %d %d %d %d\n", model.layers[il].wo->ne[0], model.layers[il].wo->ne[1], model.layers[il].wo->ne[2], model.layers[il].wo->ne[3]);
-                fprintf(stderr, "ne Kcur: %d %d %d %d\n", Kcur->ne[0], Kcur->ne[1], Kcur->ne[2], Kcur->ne[3]);
-                fprintf(stderr, "ne Vcur: %d %d %d %d\n", Vcur->ne[0], Vcur->ne[1], Vcur->ne[2], Vcur->ne[3]);
-                fprintf(stderr, "ne Qcur: %d %d %d %d\n", Qcur->ne[0], Qcur->ne[1], Qcur->ne[2], Qcur->ne[3]);
-                fprintf(stderr, "ne KQ_mask_l: %d %d %d %d\n", KQ_mask_l->ne[0], KQ_mask_l->ne[1], KQ_mask_l->ne[2], KQ_mask_l->ne[3]);
-                
-                // Use the specific KQ_mask for this layer (global or local)
-                cur = llm_build_kv(ctx0, lctx, kv_self, gf,
-                        model.layers[il].wo, NULL,
-                        Kcur, Vcur, Qcur, KQ_mask_l, n_tokens, kv_head, n_kv, 
-                        1.0f/sqrtf(float(n_embd_head)), cb, il);
-                
-                fprintf(stderr, "9f: Built KV attention\n");*/
-
                 fprintf(stderr, "9e: Applied RoPE to K\n");
 
-                // The core issue: 
-                // llm_build_kv expects Q, K, V in specific formats and the mask needs to match K's first dimension
-
-                // Q should be shaped [n_embd_head, n_head, n_tokens]
-                // K should be shaped [n_embd_head, n_head_kv, n_tokens]
-                // V should be properly reshaped too
-
-                // For llm_build_kv, we need to ensure K is in the right format relative to the mask
-                // The assertion failure is happening because mask->ne[0] needs to equal Kcur->ne[0]
-
-                // Let's fix by manually doing the attention calculation instead of using llm_build_kv
-                fprintf(stderr, "Restructuring tensors for attention calculation\n");
-
-                // First, permute Q and K for matrix multiplication
-                // Change from [n_embd_head, n_head, n_tokens] to [n_embd_head, n_tokens, n_head]
+                // Permute tensors for attention calculation
                 struct ggml_tensor * Q_trans = ggml_permute(ctx0, Qcur, 0, 2, 1, 3);
                 struct ggml_tensor * K_trans = ggml_permute(ctx0, Kcur, 0, 2, 1, 3);
 
@@ -8283,30 +8250,11 @@ struct llm_build_context {
                 QK = ggml_scale(ctx0, QK, 1.0f/sqrtf(float(n_embd_head)));
                 fprintf(stderr, "Scaled QK scores\n");
 
+                // Debug dimensions before applying mask
                 fprintf(stderr, "ne QK: %d %d %d %d\n", QK->ne[0], QK->ne[1], QK->ne[2], QK->ne[3]);
                 fprintf(stderr, "ne KQ_mask_l: %d %d %d %d\n", KQ_mask_l->ne[0], KQ_mask_l->ne[1], KQ_mask_l->ne[2], KQ_mask_l->ne[3]);
-                // Apply attention mask appropriate for this layer
-                // The mask should be combined with QK scores before softmax
-                //QK = ggml_add(ctx0, QK, KQ_mask_l); // Simply add the mask values
-                fprintf(stderr, "Applied attention mask\n");
 
-                // Softmax to get attention weights
-                /*struct ggml_tensor * attn = ggml_soft_max(ctx0, QK);
-                fprintf(stderr, "Computed softmax attention weights\n");
-
-                // Multiply with V to get weighted values
-                struct ggml_tensor * attn_out = ggml_mul_mat(ctx0, attn, ggml_cont(ctx0, V_trans));
-                fprintf(stderr, "Multiplied attention weights with values\n");
-
-                // Reshape attention output to correct dimensions
-                attn_out = ggml_cont(ctx0, ggml_permute(ctx0, attn_out, 0, 2, 1, 3));
-                attn_out = ggml_reshape_2d(ctx0, attn_out, n_embd, n_tokens);
-                fprintf(stderr, "Reshaped attention output\n");
-
-                // Project to output dimension
-                cur = llm_build_lora_mm(lctx, ctx0, model.layers[il].wo, attn_out);
-                fprintf(stderr, "Projected attention output\n");*/
-
+                // Apply mask safely for both preprocessing and token generation
                 struct ggml_tensor * attn;
                 
                 // For token generation (n_tokens == 1), skip the mask entirely
@@ -8327,16 +8275,32 @@ struct llm_build_context {
                         // Option: Create a compatible view of the mask if possible
                         if (KQ_mask_l->ne[0] >= QK->ne[0] && KQ_mask_l->ne[1] >= QK->ne[1]) {
                             struct ggml_tensor * mask_view = ggml_view_2d(ctx0, KQ_mask_l, 
-                                                                        QK->ne[0], QK->ne[1], 
-                                                                        KQ_mask_l->nb[1], 0);
+                                                                      QK->ne[0], QK->ne[1], 
+                                                                      KQ_mask_l->nb[1], 0);
                             QK = ggml_add(ctx0, QK, mask_view);
                         } else {
                             // If we can't create a compatible view, skip the mask
                             fprintf(stderr, "Skipping mask application due to incompatible dimensions\n");
                         }
+                        
                         attn = ggml_soft_max(ctx0, QK);
                     }
                 }
+                
+                fprintf(stderr, "Computed softmax attention weights\n");
+
+                // Multiply with V to get weighted values
+                struct ggml_tensor * attn_out = ggml_mul_mat(ctx0, attn, ggml_cont(ctx0, V_trans));
+                fprintf(stderr, "Multiplied attention weights with values\n");
+
+                // Reshape attention output to correct dimensions
+                attn_out = ggml_cont(ctx0, ggml_permute(ctx0, attn_out, 0, 2, 1, 3));
+                attn_out = ggml_reshape_2d(ctx0, attn_out, n_embd, n_tokens);
+                fprintf(stderr, "Reshaped attention output\n");
+
+                // Project to output dimension
+                cur = llm_build_lora_mm(lctx, ctx0, model.layers[il].wo, attn_out);
+                fprintf(stderr, "Projected attention output\n");
             }
 
             fprintf(stderr, "10a\n");
@@ -8354,107 +8318,8 @@ struct llm_build_context {
             cur = ggml_add(ctx0, cur, inpSA);
             fprintf(stderr, "11\n");
             cb(cur, "attn_out", il);
-/*
+
             // Feed-forward network
-            {
-                struct ggml_tensor * ffn_inp = cur;
-                
-                cur = llm_build_norm(ctx0, ffn_inp, hparams,
-                                    model.layers[il].ffn_norm, NULL,
-                                    LLM_NORM, cb, il);
-                /*fprintf(stderr, "12\n");
-                cb(cur, "ffn_norm", il);
-
-                fprintf(stderr, "ne cur: %d %d %d %d\n", cur->ne[0], cur->ne[1], cur->ne[2], cur->ne[3]);
-                fprintf(stderr, "ne model.layers[il].ffn_up: %d %d %d %d\n", model.layers[il].ffn_up->ne[0], model.layers[il].ffn_up->ne[1], model.layers[il].ffn_up->ne[2], model.layers[il].ffn_up->ne[3]);
-                fprintf(stderr, "ne model.layers[il].ffn_gate: %d %d %d %d\n", model.layers[il].ffn_gate->ne[0], model.layers[il].ffn_gate->ne[1], model.layers[il].ffn_gate->ne[2], model.layers[il].ffn_gate->ne[3]);
-                fprintf(stderr, "ne model.layers[il].ffn_down: %d %d %d %d\n", model.layers[il].ffn_down->ne[0], model.layers[il].ffn_down->ne[1], model.layers[il].ffn_down->ne[2], model.layers[il].ffn_down->ne[3]);
-
-                
-                cur = llm_build_ffn(ctx0, lctx, cur,
-                                    model.layers[il].ffn_up, NULL, NULL,
-                                    model.layers[il].ffn_gate, NULL, NULL,
-                                    model.layers[il].ffn_down, NULL, NULL,
-                                    NULL,
-                                    LLM_FFN_GELU, LLM_FFN_PAR, cb, il);
-                fprintf(stderr, "13\n");*/
-                /*
-                fprintf(stderr, "12\n");
-                cb(cur, "ffn_norm", il);
-
-                // Check tensor dimensions to ensure compatibility
-                fprintf(stderr, "FFN dimensions - cur: %d %d, ffn_up: %d %d, ffn_gate: %d %d\n", 
-                        cur->ne[0], cur->ne[1], 
-                        model.layers[il].ffn_up->ne[0], model.layers[il].ffn_up->ne[1],
-                        model.layers[il].ffn_gate->ne[0], model.layers[il].ffn_gate->ne[1]);
-
-                // For ModernBERT: 
-                // - ffn_up projects to intermediate size (1024 → 5248)
-                // - There's a GeGLU activation 
-                // - ffn_gate is used for the down-projection (2624 → 1024)
-
-                // First step: Project up to intermediate dimension
-                struct ggml_tensor * up = llm_build_lora_mm(lctx, ctx0, model.layers[il].ffn_up, cur);
-                fprintf(stderr, "FFN up projection: %d %d\n", up->ne[0], up->ne[1]);
-
-                // Split the tensor for GeGLU activation
-                int intermediate_size = up->ne[0] / 2;
-                fprintf(stderr, "Intermediate size: %d\n", intermediate_size);
-
-                // Split into two halves for GeGLU
-                struct ggml_tensor * gelu_part = ggml_view_2d(ctx0, up, 
-                                                    intermediate_size, up->ne[1], 
-                                                    up->nb[1], 0);
-
-                struct ggml_tensor * gate_part = ggml_view_2d(ctx0, up, 
-                                                    intermediate_size, up->ne[1], 
-                                                    up->nb[1], intermediate_size * ggml_element_size(up));
-
-                // Apply GELU to first half
-                gelu_part = ggml_gelu(ctx0, gelu_part);
-
-                // Multiply by gate (element-wise)
-                struct ggml_tensor * geglu_out = ggml_mul(ctx0, gelu_part, gate_part);
-                fprintf(stderr, "GeGLU output: %d %d\n", geglu_out->ne[0], geglu_out->ne[1]);
-
-                // Make sure geglu_out is compatible with ffn_gate for matrix multiplication
-                // This might require reshaping geglu_out to match what ffn_gate expects
-                geglu_out = ggml_cont(ctx0, geglu_out);
-
-                // Check if dimensions are compatible for matrix multiplication
-                fprintf(stderr, "Pre-transpose geglu_out: %d %d\n", geglu_out->ne[0], geglu_out->ne[1]);
-                fprintf(stderr, "ffn_gate: %d %d\n", model.layers[il].ffn_gate->ne[0], model.layers[il].ffn_gate->ne[1]);
-
-                // Down-projection
-                // Note: The dimensions seem to indicate we need to transpose geglu_out
-                // for proper matrix multiplication with ffn_gate
-                struct ggml_tensor * down;
-                if (model.layers[il].ffn_gate->ne[1] == geglu_out->ne[0]) {
-                    // Standard matrix multiplication: ffn_gate × geglu_out
-                    down = llm_build_lora_mm(lctx, ctx0, model.layers[il].ffn_gate, geglu_out);
-                } else {
-                    // Need to transpose/reshape for compatibility
-                    struct ggml_tensor * geglu_trans = ggml_transpose(ctx0, geglu_out);
-                    fprintf(stderr, "Transposed geglu_out: %d %d\n", geglu_trans->ne[0], geglu_trans->ne[1]);
-                    fprintf(stderr, "ffn_gate: %d %d\n", model.layers[il].ffn_gate->ne[0], model.layers[il].ffn_gate->ne[1]);
-                    fprintf(stderr, "geglu_trans: %d %d\n", geglu_trans->ne[0], geglu_trans->ne[1]);
-                    down = ggml_mul_mat(ctx0, model.layers[il].ffn_gate, geglu_trans);
-                    down = ggml_transpose(ctx0, down); // Transpose back to expected output shape
-                }
-
-                fprintf(stderr, "FFN down output: %d %d\n", down->ne[0], down->ne[1]);
-
-                // Final output should match the original input dimensions
-                cur = down;
-                fprintf(stderr, "13\n");
-                cb(cur, "ffn_out", il);
-                
-                cur = ggml_add(ctx0, cur, ffn_inp);
-                fprintf(stderr, "14\n");
-            }
-            */
-
-           // Feed-forward network
             {
                 struct ggml_tensor * ffn_inp = cur;
                 
@@ -8538,8 +8403,6 @@ struct llm_build_context {
         
         return gf;
     }
-
-
 };
 
 
